@@ -1,5 +1,6 @@
 streamlit
 yt_dlp
-torch==2.0.1
 openai-whisper
+torch==2.0.1
 numpy
+ffmpeg-python
