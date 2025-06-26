@@ -7,33 +7,27 @@ import uuid
 import re
 import time
 import torch
-import multiprocessing
 from glob import glob
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
+# GPU有無で自動切替
 USE_GPU = torch.cuda.is_available()
 DEVICE = "cuda" if USE_GPU else "cpu"
 
-# Whisperモデルをキャッシュ
 @st.cache_resource(show_spinner="Whisperモデルを読み込み中…")
 def load_model(model_size):
     model = whisper.load_model(model_size)
     return model.to(DEVICE)
 
-# 無音チェック
 def is_silent_audio(file_path, threshold_db=-40):
     result = subprocess.run(
         ["ffmpeg", "-i", file_path, "-af", "volumedetect", "-f", "null", "-"],
         stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True
     )
-    stderr = result.stderr
-    match = re.search(r"mean_volume: (-?\d+\.?\d*) dB", stderr)
-    if match:
-        return float(match.group(1)) < threshold_db
-    return True
+    match = re.search(r"mean_volume: (-?\d+\.?\d*) dB", result.stderr)
+    return float(match.group(1)) < threshold_db if match else True
 
-# YouTube音声ダウンロード＋WAV変換
 def download_and_convert(url, temp_id):
     m4a_path = f"{temp_id}.m4a"
     wav_path = f"{temp_id}.wav"
@@ -52,7 +46,6 @@ def download_and_convert(url, temp_id):
         raise FileNotFoundError(f"{wav_path} が作成されませんでした。\nffmpeg stderr:\n{result.stderr.decode()}")
     return wav_path, m4a_path
 
-# 音声分割
 def split_audio_fast(input_file, chunk_length=900):
     output_template = f"{input_file}_part_%03d.wav"
     cmd = [
@@ -65,42 +58,19 @@ def split_audio_fast(input_file, chunk_length=900):
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return sorted(glob(f"{input_file}_part_*.wav"))
 
-# 整形
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
-    text = re.sub(r'\n{2,}', '\n', text).strip()
-    return text
-
-# Whisper推論（multiprocessingでタイムアウト付き）
-def transcribe_chunk_with_timeout(model, chunk, timeout=30):
-    def worker(pipe_conn, model_path, chunk_path):
-        try:
-            model_local = whisper.load_model(model_path).to(DEVICE)
-            result = model_local.transcribe(chunk_path, language="ja", fp16=False, no_speech_threshold=0.1)["text"]
-            pipe_conn.send(result)
-        except Exception as e:
-            pipe_conn.send(f"ERROR: {e}")
-
-    parent_conn, child_conn = multiprocessing.Pipe()
-    p = multiprocessing.Process(target=worker, args=(child_conn, model_size, chunk))
-    p.start()
-    p.join(timeout)
-    if p.is_alive():
-        p.terminate()
-        return "ERROR: タイムアウトしました"
-    return parent_conn.recv()
+    return re.sub(r'\n{2,}', '\n', text).strip()
 
 # --- UI ---
 st.title("🎙️ YouTube文字起こしツール（完全無料公開版）")
-
 url = st.text_input("🎥 YouTube動画のURLを入力してください：")
 model_size = st.selectbox("⚙️ 使用するWhisperモデルを選択：", ["tiny", "base", "medium"], index=1)
 
 st.subheader("📝 整形済み文字起こし")
 output_placeholder = st.empty()
 copy_btn_placeholder = st.empty()
-formatted_text = ""
 
 if st.button("▶️ 文字起こし開始"):
     if not url:
@@ -108,8 +78,8 @@ if st.button("▶️ 文字起こし開始"):
     else:
         status = st.empty()
         progress_bar = st.progress(0, text="開始準備中…")
-
         try:
+            model = load_model(model_size)
             temp_id = str(uuid.uuid4())
 
             status.info("🔄 音声ダウンロード中…")
@@ -133,32 +103,26 @@ if st.button("▶️ 文字起こし開始"):
                 if chunk_size < 1000:
                     st.warning(f"{chunk} は空のためスキップされました。")
                     continue
-
                 if is_silent_audio(chunk):
                     st.warning(f"{chunk} は無音のためスキップされました。")
                     continue
 
-                start = time.time()
-                status_text = f"🧠 {i+1}/{total_chunks} チャンク文字起こし中…"
-                if durations:
-                    avg = sum(durations) / len(durations)
-                    remaining = int(avg * (total_chunks - i))
-                    mins, secs = divmod(remaining, 60)
-                    status_text += f"（残り：約 {mins}分 {secs}秒）"
-                progress_bar.progress(min((i+1) / total_chunks, 1.0), text=status_text)
+                try:
+                    start = time.time()
+                    est = ""
+                    if durations:
+                        avg = sum(durations) / len(durations)
+                        remaining = int(avg * (total_chunks - i))
+                        mins, secs = divmod(remaining, 60)
+                        est = f"（残り：約 {mins}分 {secs}秒）"
+                    progress_bar.progress(min((i + 1) / total_chunks, 1.0), text=f"🧠 {i+1}/{total_chunks} チャンク文字起こし中… {est}")
 
-                st.info(f"🧠 {chunk} の文字起こしを開始します…")
-                print(f"--- TRANSCRIBE開始: {chunk} ---")
-                result = transcribe_chunk_with_timeout(model_size, chunk, timeout=60)
-                print(f"--- TRANSCRIBE終了: {chunk} ---")
-
-                if result.startswith("ERROR"):
-                    st.error(f"❌ {chunk} の文字起こしに失敗: {result}")
-                    continue
-
-                texts.append(result)
-                durations.append(time.time() - start)
-                st.success(f"✅ {chunk} 完了")
+                    result = model.transcribe(chunk, language="ja", fp16=USE_GPU)["text"]
+                    texts.append(result)
+                    durations.append(time.time() - start)
+                    st.success(f"✅ {chunk} 完了")
+                except Exception as e:
+                    st.error(f"❌ {chunk} の文字起こしに失敗: {e}")
 
             progress_bar.progress(1.0, text="🎉 文字起こし完了！")
 
@@ -172,6 +136,7 @@ if st.button("▶️ 文字起こし開始"):
                 output_placeholder.text_area("以下が文字起こしの全文です：", formatted_text, height=400)
                 copy_btn_placeholder.download_button("📋 全文コピー（テキストファイル）", formatted_text, file_name="transcription.txt")
 
+            # クリーンアップ
             for f in [wav_file, m4a_file] + chunks:
                 if os.path.exists(f):
                     os.remove(f)
