@@ -5,6 +5,7 @@ import subprocess
 import os
 import uuid
 import re
+import time
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
@@ -12,7 +13,6 @@ st.set_page_config(page_title="YouTube文字起こしツール")
 def load_model():
     return whisper.load_model("tiny")  # 軽量＆高速
 
-# YouTube音声を.m4aでDL → wav変換
 def download_and_convert(url, temp_id):
     m4a_path = f"{temp_id}.m4a"
     wav_path = f"{temp_id}.wav"
@@ -31,10 +31,9 @@ def download_and_convert(url, temp_id):
     )
     if not os.path.exists(wav_path):
         raise FileNotFoundError(f"{wav_path} が作成されませんでした。\nffmpeg stderr:\n{result.stderr.decode()}")
-
+    
     return wav_path, m4a_path
 
-# 900秒ごとに分割
 def split_audio(input_file, chunk_length=900):
     chunks = []
     idx = 0
@@ -49,7 +48,6 @@ def split_audio(input_file, chunk_length=900):
         idx += 1
     return chunks
 
-# 日本語整形
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
@@ -66,7 +64,7 @@ if st.button("▶️ 文字起こし開始"):
     else:
         with st.spinner("処理中です…しばらくお待ちください"):
             try:
-                model = load_model()  # モデルを先に取得
+                model = load_model()
                 temp_id = str(uuid.uuid4())
                 wav_file, m4a_file = download_and_convert(url, temp_id)
 
@@ -74,16 +72,30 @@ if st.button("▶️ 文字起こし開始"):
                 st.success(f"{len(chunks)} チャンクに分割されました")
 
                 texts = []
+                durations = []
+                status_placeholder = st.empty()
+
                 for i, c in enumerate(chunks):
-                    texts.append(model.transcribe(c, language="ja")["text"])
+                    start_time = time.time()
+                    status_placeholder.info(f"{i+1}/{len(chunks)} チャンク処理中…")
+                    result = model.transcribe(c, language="ja")["text"]
+                    end_time = time.time()
+
+                    elapsed = end_time - start_time
+                    durations.append(elapsed)
+                    texts.append(result)
+
+                    # 残り時間予測表示
+                    remaining = int((len(chunks) - i - 1) * (sum(durations) / len(durations)))
+                    status_placeholder.info(f"{i+1}/{len(chunks)} チャンク処理中｜残り予測：{remaining}秒")
 
                 full = "\n".join(texts)
                 formatted = format_text_japanese(full)
+
                 st.subheader("📝 整形済み文字起こし")
                 st.text_area("", formatted, height=400)
                 st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
 
-                # cleanup
                 for f in [wav_file, m4a_file] + chunks:
                     if os.path.exists(f):
                         os.remove(f)
