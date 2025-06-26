@@ -1,4 +1,4 @@
 streamlit
-openai-whisper
-yt-dlp
-ffmpeg-python
+yt_dlp
+torch==2.0.1
+whisper
