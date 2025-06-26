@@ -68,6 +68,12 @@ def format_text_japanese(raw_text):
 st.title("🎙️ YouTube文字起こしツール（完全無料公開版）")
 url = st.text_input("YouTube動画のURLを入力してください：")
 
+# 出力欄（常時表示）
+st.subheader("📝 整形済み文字起こし")
+output_placeholder = st.empty()
+copy_btn_placeholder = st.empty()
+formatted_text = ""  # 初期状態は空
+
 if st.button("▶️ 文字起こし開始"):
     if not url:
         st.error("まず URL を入力してください")
@@ -112,20 +118,15 @@ if st.button("▶️ 文字起こし開始"):
             progress_bar.progress(1.0, text="🎉 文字起こし完了！")
 
             full = "\n".join(texts)
-            formatted = format_text_japanese(full)
+            formatted_text = format_text_japanese(full)
 
             status.success("✅ 全工程が完了しました")
 
-            # -----------------------------
-            # 📌 結果を画面に表示＆コピー機能
-            # -----------------------------
-            st.subheader("📝 整形済み文字起こし")
-            st.text_area("以下が文字起こしの全文です：", formatted, height=400)
-            st.download_button("📋 全文コピー（テキストファイル）", formatted, file_name="transcription.txt")
+            # 🔽 出力欄に反映
+            output_placeholder.text_area("以下が文字起こしの全文です：", formatted_text, height=400)
+            copy_btn_placeholder.download_button("📋 全文コピー（テキストファイル）", formatted_text, file_name="transcription.txt")
 
-            # -----------------------------
             # 🔃 クリーンアップ
-            # -----------------------------
             for f in [wav_file, m4a_file] + chunks:
                 if os.path.exists(f):
                     os.remove(f)
