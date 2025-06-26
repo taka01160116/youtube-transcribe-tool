@@ -18,7 +18,7 @@ DEVICE = "cuda" if USE_GPU else "cpu"
 # Whisperモデルをキャッシュ（初回のみ読み込み）
 @st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒）")
 def load_model():
-    model = whisper.load_model("base")  # base = 精度と速度のバランス良
+    model = whisper.load_model("base")
     return model.to(DEVICE)
 
 # YouTubeから音声ダウンロード＋WAV変換
@@ -44,7 +44,7 @@ def download_and_convert(url, temp_id):
 
     return wav_path, m4a_path
 
-# 高速一括分割（ffmpegのsegment機能）
+# 高速一括分割
 def split_audio_fast(input_file, chunk_length=900):
     output_template = f"{input_file}_part_%03d.wav"
     cmd = [
@@ -57,7 +57,7 @@ def split_audio_fast(input_file, chunk_length=900):
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return sorted(glob(f"{input_file}_part_*.wav"))
 
-# 日本語テキスト整形（句点と接続詞で改行）
+# テキスト整形
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
@@ -114,15 +114,21 @@ if st.button("▶️ 文字起こし開始"):
             full = "\n".join(texts)
             formatted = format_text_japanese(full)
 
-            st.subheader("📝 整形済み文字起こし")
-            st.text_area("", formatted, height=400)
-            st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
+            status.success("✅ 全工程が完了しました")
 
+            # -----------------------------
+            # 📌 結果を画面に表示＆コピー機能
+            # -----------------------------
+            st.subheader("📝 整形済み文字起こし")
+            st.text_area("以下が文字起こしの全文です：", formatted, height=400)
+            st.download_button("📋 全文コピー（テキストファイル）", formatted, file_name="transcription.txt")
+
+            # -----------------------------
+            # 🔃 クリーンアップ
+            # -----------------------------
             for f in [wav_file, m4a_file] + chunks:
                 if os.path.exists(f):
                     os.remove(f)
-
-            status.success("✅ 全工程が完了しました")
 
         except Exception as e:
             status.error(f"エラー：{e}")
