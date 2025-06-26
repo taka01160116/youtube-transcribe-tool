@@ -1,5 +1,6 @@
-streamlit
-pytube
+streamlit==1.35.0
+pytube==15.0.0
 openai-whisper
 ffmpeg-python
 torch
+torchaudio
