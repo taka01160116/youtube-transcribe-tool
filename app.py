@@ -6,17 +6,19 @@ import os
 import uuid
 import re
 import time
+from glob import glob
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
+# Whisperモデルをキャッシュして初回読み込みだけ遅延
 @st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒）")
 def load_model():
-    return whisper.load_model("tiny")
+    return whisper.load_model("tiny")  # high accuracyはbase/mediumに変更可
 
+# YouTube音声をダウンロードしてWAV変換
 def download_and_convert(url, temp_id):
     m4a_path = f"{temp_id}.m4a"
     wav_path = f"{temp_id}.wav"
-
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': m4a_path,
@@ -35,20 +37,23 @@ def download_and_convert(url, temp_id):
 
     return wav_path, m4a_path
 
-def split_audio(input_file, chunk_length=900):
-    chunks = []
-    idx = 0
-    while True:
-        out = f"{input_file}_part{idx}.wav"
-        cmd = ["ffmpeg", "-y", "-i", input_file, "-ss", str(idx * chunk_length),
-               "-t", str(chunk_length), "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", out]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if not os.path.exists(out):
-            break
-        chunks.append(out)
-        idx += 1
+# 高速音声分割（全チャンクを一括処理）
+def split_audio_fast(input_file, chunk_length=900):
+    output_template = f"{input_file}_part_%03d.wav"
+    cmd = [
+        "ffmpeg", "-i", input_file,
+        "-f", "segment",
+        "-segment_time", str(chunk_length),
+        "-c", "pcm_s16le", "-ar", "16000", "-ac", "1",
+        output_template
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # 分割されたファイル一覧取得
+    chunks = sorted(glob(f"{input_file}_part_*.wav"))
     return chunks
 
+# 日本語の整形処理
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
@@ -65,17 +70,22 @@ if st.button("▶️ 文字起こし開始"):
     else:
         status = st.empty()
         progress_bar = st.progress(0, text="開始準備中…")
+
         try:
+            # モデル読み込み
             model = load_model()
 
+            # ダウンロード＋変換
             temp_id = str(uuid.uuid4())
             status.info("🔄 音声ダウンロード中…")
             wav_file, m4a_file = download_and_convert(url, temp_id)
 
+            # 分割
             status.info("🔄 音声分割中…")
-            chunks = split_audio(wav_file)
+            chunks = split_audio_fast(wav_file)
             status.success(f"✅ {len(chunks)} チャンクに分割されました")
 
+            # 文字起こし＆進捗表示
             texts = []
             durations = []
             total_chunks = len(chunks)
@@ -91,7 +101,7 @@ if st.button("▶️ 文字起こし開始"):
                     seconds = remaining_sec % 60
                     status_text += f"（残り：約 {minutes}分 {seconds}秒）"
 
-                percent_complete = int(((i) / total_chunks) * 100)
+                percent_complete = int((i / total_chunks) * 100)
                 progress_bar.progress(percent_complete, text=status_text)
 
                 result = model.transcribe(c, language="ja")["text"]
@@ -100,6 +110,7 @@ if st.button("▶️ 文字起こし開始"):
 
             progress_bar.progress(100, text="🎉 文字起こし完了！")
 
+            # 整形と表示
             full = "\n".join(texts)
             formatted = format_text_japanese(full)
 
@@ -107,6 +118,7 @@ if st.button("▶️ 文字起こし開始"):
             st.text_area("", formatted, height=400)
             st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
 
+            # クリーンアップ
             for f in [wav_file, m4a_file] + chunks:
                 if os.path.exists(f):
                     os.remove(f)
