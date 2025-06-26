@@ -18,7 +18,7 @@ DEVICE = "cuda" if USE_GPU else "cpu"
 # Whisperモデルをキャッシュ（初回のみ読み込み）
 @st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒）")
 def load_model():
-    model = whisper.load_model("base")
+    model = whisper.load_model("base")  # 精度重視なら "medium"、高速重視なら "tiny"
     return model.to(DEVICE)
 
 # YouTubeから音声ダウンロード＋WAV変換
@@ -44,7 +44,7 @@ def download_and_convert(url, temp_id):
 
     return wav_path, m4a_path
 
-# 高速一括分割
+# 高速一括分割（ffmpegのsegment機能）
 def split_audio_fast(input_file, chunk_length=900):
     output_template = f"{input_file}_part_%03d.wav"
     cmd = [
@@ -57,7 +57,7 @@ def split_audio_fast(input_file, chunk_length=900):
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return sorted(glob(f"{input_file}_part_*.wav"))
 
-# テキスト整形
+# 日本語テキスト整形（句点と接続詞で改行）
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
@@ -110,6 +110,11 @@ if st.button("▶️ 文字起こし開始"):
                     status_text += f"（残り：約 {mins}分 {secs}秒）"
 
                 progress_bar.progress(min((i+1) / total_chunks, 1.0), text=status_text)
+
+                # 🔍 ファイルが空かチェック
+                if os.path.getsize(chunk) < 1000:
+                    st.warning(f"{chunk} は空のためスキップされました。")
+                    continue
 
                 result = model.transcribe(chunk, language="ja", fp16=False)["text"]
                 texts.append(result)
