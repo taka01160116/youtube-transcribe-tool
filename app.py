@@ -8,7 +8,11 @@ import re
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
-# YouTube音声を.m4aでダウンロードし、.wavに変換
+@st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒かかります）")
+def load_model():
+    return whisper.load_model("tiny")  # 軽量＆高速
+
+# YouTube音声を.m4aでDL → wav変換
 def download_and_convert(url, temp_id):
     m4a_path = f"{temp_id}.m4a"
     wav_path = f"{temp_id}.wav"
@@ -30,7 +34,7 @@ def download_and_convert(url, temp_id):
 
     return wav_path, m4a_path
 
-# 音声ファイルを900秒ごとに分割
+# 900秒ごとに分割
 def split_audio(input_file, chunk_length=900):
     chunks = []
     idx = 0
@@ -45,7 +49,7 @@ def split_audio(input_file, chunk_length=900):
         idx += 1
     return chunks
 
-# 日本語文章を整形（句点や接続詞で改行）
+# 日本語整形
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
@@ -62,16 +66,18 @@ if st.button("▶️ 文字起こし開始"):
     else:
         with st.spinner("処理中です…しばらくお待ちください"):
             try:
+                model = load_model()  # モデルを先に取得
                 temp_id = str(uuid.uuid4())
                 wav_file, m4a_file = download_and_convert(url, temp_id)
 
                 chunks = split_audio(wav_file)
-                model = whisper.load_model("base")
-                full = ""
-                for i, c in enumerate(chunks):
-                    st.info(f"{i+1}/{len(chunks)} チャンク処理中…")
-                    full += model.transcribe(c, language="ja")["text"] + "\n"
+                st.success(f"{len(chunks)} チャンクに分割されました")
 
+                texts = []
+                for i, c in enumerate(chunks):
+                    texts.append(model.transcribe(c, language="ja")["text"])
+
+                full = "\n".join(texts)
                 formatted = format_text_japanese(full)
                 st.subheader("📝 整形済み文字起こし")
                 st.text_area("", formatted, height=400)
