@@ -11,21 +11,31 @@ from glob import glob
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
-# GPU利用可否チェック
 USE_GPU = torch.cuda.is_available()
 DEVICE = "cuda" if USE_GPU else "cpu"
 
-# Whisperモデルをキャッシュ（初回のみ読み込み）
-@st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒）")
-def load_model():
-    model = whisper.load_model("base")
+# Whisperモデルをキャッシュ
+@st.cache_resource(show_spinner="Whisperモデルを読み込み中…")
+def load_model(model_size):
+    model = whisper.load_model(model_size)
     return model.to(DEVICE)
 
-# YouTubeから音声ダウンロード＋WAV変換
+# 無音チェック
+def is_silent_audio(file_path, threshold_db=-40):
+    result = subprocess.run(
+        ["ffmpeg", "-i", file_path, "-af", "volumedetect", "-f", "null", "-"],
+        stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    stderr = result.stderr
+    match = re.search(r"mean_volume: (-?\d+\.?\d*) dB", stderr)
+    if match:
+        return float(match.group(1)) < threshold_db
+    return True  # 判定不能なら無音とみなす
+
+# YouTube音声ダウンロード＋WAV変換
 def download_and_convert(url, temp_id):
     m4a_path = f"{temp_id}.m4a"
     wav_path = f"{temp_id}.wav"
-
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': m4a_path,
@@ -33,15 +43,12 @@ def download_and_convert(url, temp_id):
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-
     result = subprocess.run(
         ["ffmpeg", "-y", "-i", m4a_path, "-ar", "16000", "-ac", "1", wav_path],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-
     if not os.path.exists(wav_path):
         raise FileNotFoundError(f"{wav_path} が作成されませんでした。\nffmpeg stderr:\n{result.stderr.decode()}")
-
     return wav_path, m4a_path
 
 # 音声分割
@@ -66,9 +73,10 @@ def format_text_japanese(raw_text):
 
 # --- UI ---
 st.title("🎙️ YouTube文字起こしツール（完全無料公開版）")
-url = st.text_input("YouTube動画のURLを入力してください：")
 
-# 出力欄（常時表示）
+url = st.text_input("🎥 YouTube動画のURLを入力してください：")
+model_size = st.selectbox("⚙️ 使用するWhisperモデルを選択：", ["tiny", "base", "medium"], index=1)
+
 st.subheader("📝 整形済み文字起こし")
 output_placeholder = st.empty()
 copy_btn_placeholder = st.empty()
@@ -82,7 +90,7 @@ if st.button("▶️ 文字起こし開始"):
         progress_bar = st.progress(0, text="開始準備中…")
 
         try:
-            model = load_model()
+            model = load_model(model_size)
             temp_id = str(uuid.uuid4())
 
             status.info("🔄 音声ダウンロード中…")
@@ -101,10 +109,14 @@ if st.button("▶️ 文字起こし開始"):
 
             for i, chunk in enumerate(chunks):
                 chunk_size = os.path.getsize(chunk)
-                st.write(f"🔍 処理中: {chunk}（{chunk_size}バイト）")
+                st.write(f"🔍 処理中: {chunk}（{chunk_size} バイト）")
 
                 if chunk_size < 1000:
                     st.warning(f"{chunk} は空のためスキップされました。")
+                    continue
+
+                if is_silent_audio(chunk):
+                    st.warning(f"{chunk} は無音のためスキップされました。")
                     continue
 
                 try:
@@ -129,11 +141,12 @@ if st.button("▶️ 文字起こし開始"):
             full = "\n".join(texts)
             formatted_text = format_text_japanese(full)
 
-            status.success("✅ 全工程が完了しました")
-
-            # 出力反映
-            output_placeholder.text_area("以下が文字起こしの全文です：", formatted_text, height=400)
-            copy_btn_placeholder.download_button("📋 全文コピー（テキストファイル）", formatted_text, file_name="transcription.txt")
+            if not formatted_text.strip():
+                status.warning("⚠️ 有効な音声が検出されませんでした。")
+            else:
+                status.success("✅ 全工程が完了しました")
+                output_placeholder.text_area("以下が文字起こしの全文です：", formatted_text, height=400)
+                copy_btn_placeholder.download_button("📋 全文コピー（テキストファイル）", formatted_text, file_name="transcription.txt")
 
             # クリーンアップ
             for f in [wav_file, m4a_file] + chunks:
