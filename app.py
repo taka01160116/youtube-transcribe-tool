@@ -8,20 +8,29 @@ import re
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
-def download_audio_ytdlp(url, output_path):
+# YouTube音声を.m4aでダウンロードし、.wavに変換
+def download_and_convert(url, temp_id):
+    m4a_path = f"{temp_id}.m4a"
+    wav_path = f"{temp_id}.wav"
+
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': output_path,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-            'preferredquality': '192',
-        }],
-        'quiet': True,
+        'outtmpl': m4a_path,
+        'quiet': True
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", m4a_path, "-ar", "16000", "-ac", "1", wav_path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if not os.path.exists(wav_path):
+        raise FileNotFoundError(f"{wav_path} が作成されませんでした。\nffmpeg stderr:\n{result.stderr.decode()}")
+
+    return wav_path, m4a_path
+
+# 音声ファイルを900秒ごとに分割
 def split_audio(input_file, chunk_length=900):
     chunks = []
     idx = 0
@@ -36,12 +45,14 @@ def split_audio(input_file, chunk_length=900):
         idx += 1
     return chunks
 
+# 日本語文章を整形（句点や接続詞で改行）
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
     text = re.sub(r'\n{2,}', '\n', text).strip()
     return text
 
+# UI
 st.title("🎙️ YouTube文字起こしツール（完全無料公開版）")
 url = st.text_input("YouTube動画のURLを入力してください：")
 
@@ -52,14 +63,8 @@ if st.button("▶️ 文字起こし開始"):
         with st.spinner("処理中です…しばらくお待ちください"):
             try:
                 temp_id = str(uuid.uuid4())
-                wav_file = f"{temp_id}.wav"
+                wav_file, m4a_file = download_and_convert(url, temp_id)
 
-                # 音声ダウンロード
-                download_audio_ytdlp(url, wav_file)
-                if not os.path.exists(wav_file):
-                    raise FileNotFoundError(f"{wav_file} が作成されませんでした")
-
-                # 音声分割と文字起こし
                 chunks = split_audio(wav_file)
                 model = whisper.load_model("base")
                 full = ""
@@ -67,16 +72,15 @@ if st.button("▶️ 文字起こし開始"):
                     st.info(f"{i+1}/{len(chunks)} チャンク処理中…")
                     full += model.transcribe(c, language="ja")["text"] + "\n"
 
-                # 整形・表示
                 formatted = format_text_japanese(full)
                 st.subheader("📝 整形済み文字起こし")
                 st.text_area("", formatted, height=400)
                 st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
 
                 # cleanup
-                if os.path.exists(wav_file): os.remove(wav_file)
-                for c in chunks:
-                    if os.path.exists(c): os.remove(c)
+                for f in [wav_file, m4a_file] + chunks:
+                    if os.path.exists(f):
+                        os.remove(f)
 
             except Exception as e:
                 st.error(f"エラー：{e}")
