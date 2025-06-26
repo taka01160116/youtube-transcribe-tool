@@ -9,10 +9,12 @@ import time
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
-@st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒かかります）")
+# モデル読み込み（初回のみ時間がかかる）
+@st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒）")
 def load_model():
-    return whisper.load_model("tiny")  # 軽量＆高速
+    return whisper.load_model("tiny")  # 軽量モデル使用
 
+# YouTubeから音声DL＆WAV変換
 def download_and_convert(url, temp_id):
     m4a_path = f"{temp_id}.m4a"
     wav_path = f"{temp_id}.wav"
@@ -29,11 +31,13 @@ def download_and_convert(url, temp_id):
         ["ffmpeg", "-y", "-i", m4a_path, "-ar", "16000", "-ac", "1", wav_path],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+
     if not os.path.exists(wav_path):
         raise FileNotFoundError(f"{wav_path} が作成されませんでした。\nffmpeg stderr:\n{result.stderr.decode()}")
-    
+
     return wav_path, m4a_path
 
+# 音声を900秒（15分）単位で分割
 def split_audio(input_file, chunk_length=900):
     chunks = []
     idx = 0
@@ -48,13 +52,14 @@ def split_audio(input_file, chunk_length=900):
         idx += 1
     return chunks
 
+# 日本語整形（句点や接続詞で改行）
 def format_text_japanese(raw_text):
     text = re.sub(r'(?<=[。！？])', '\n', raw_text)
     text = re.sub(r'([^\n]{20,40}?)(が|ので|けど|のに|そして|また|つまり)', r'\1、\2', text)
     text = re.sub(r'\n{2,}', '\n', text).strip()
     return text
 
-# UI
+# --- UI ---
 st.title("🎙️ YouTube文字起こしツール（完全無料公開版）")
 url = st.text_input("YouTube動画のURLを入力してください：")
 
@@ -62,43 +67,54 @@ if st.button("▶️ 文字起こし開始"):
     if not url:
         st.error("まず URL を入力してください")
     else:
-        with st.spinner("処理中です…しばらくお待ちください"):
-            try:
-                model = load_model()
-                temp_id = str(uuid.uuid4())
-                wav_file, m4a_file = download_and_convert(url, temp_id)
+        status = st.empty()  # 状態表示用プレースホルダ
+        try:
+            # モデル読み込み
+            model = load_model()
 
-                chunks = split_audio(wav_file)
-                st.success(f"{len(chunks)} チャンクに分割されました")
+            # 音声ダウンロードと変換
+            temp_id = str(uuid.uuid4())
+            status.info("🔄 音声ダウンロード中…")
+            wav_file, m4a_file = download_and_convert(url, temp_id)
 
-                texts = []
-                durations = []
-                status_placeholder = st.empty()
+            # 分割
+            status.info("🔄 音声分割中…")
+            chunks = split_audio(wav_file)
+            status.success(f"✅ {len(chunks)} チャンクに分割されました")
 
-                for i, c in enumerate(chunks):
-                    start_time = time.time()
-                    status_placeholder.info(f"{i+1}/{len(chunks)} チャンク処理中…")
-                    result = model.transcribe(c, language="ja")["text"]
-                    end_time = time.time()
+            # 文字起こしと時間計測
+            texts = []
+            durations = []
+            for i, c in enumerate(chunks):
+                start = time.time()
+                progress_text = f"🧠 {i+1}/{len(chunks)} チャンク文字起こし中…"
 
-                    elapsed = end_time - start_time
-                    durations.append(elapsed)
-                    texts.append(result)
+                # 残り予測時間の表示
+                if durations:
+                    avg = sum(durations) / len(durations)
+                    remaining = int(avg * (len(chunks) - i))
+                    progress_text += f"（残り：約 {remaining} 秒）"
 
-                    # 残り時間予測表示
-                    remaining = int((len(chunks) - i - 1) * (sum(durations) / len(durations)))
-                    status_placeholder.info(f"{i+1}/{len(chunks)} チャンク処理中｜残り予測：{remaining}秒")
+                status.info(progress_text)
 
-                full = "\n".join(texts)
-                formatted = format_text_japanese(full)
+                result = model.transcribe(c, language="ja")["text"]
+                texts.append(result)
+                durations.append(time.time() - start)
 
-                st.subheader("📝 整形済み文字起こし")
-                st.text_area("", formatted, height=400)
-                st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
+            # 整形して出力
+            full = "\n".join(texts)
+            formatted = format_text_japanese(full)
 
-                for f in [wav_file, m4a_file] + chunks:
-                    if os.path.exists(f):
-                        os.remove(f)
+            st.subheader("📝 整形済み文字起こし")
+            st.text_area("", formatted, height=400)
+            st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
 
-            except Exception as e:
-                st.error(f"エラー：{e}")
+            # クリーンアップ
+            for f in [wav_file, m4a_file] + chunks:
+                if os.path.exists(f):
+                    os.remove(f)
+
+            status.success("🎉 文字起こし完了！")
+
+        except Exception as e:
+            status.error(f"エラー：{e}")
