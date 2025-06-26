@@ -7,6 +7,7 @@ import uuid
 import re
 import time
 import torch
+import multiprocessing
 from glob import glob
 
 st.set_page_config(page_title="YouTube文字起こしツール")
@@ -30,7 +31,7 @@ def is_silent_audio(file_path, threshold_db=-40):
     match = re.search(r"mean_volume: (-?\d+\.?\d*) dB", stderr)
     if match:
         return float(match.group(1)) < threshold_db
-    return True  # 判定不能なら無音とみなす
+    return True
 
 # YouTube音声ダウンロード＋WAV変換
 def download_and_convert(url, temp_id):
@@ -71,6 +72,25 @@ def format_text_japanese(raw_text):
     text = re.sub(r'\n{2,}', '\n', text).strip()
     return text
 
+# Whisper推論（multiprocessingでタイムアウト付き）
+def transcribe_chunk_with_timeout(model, chunk, timeout=30):
+    def worker(pipe_conn, model_path, chunk_path):
+        try:
+            model_local = whisper.load_model(model_path).to(DEVICE)
+            result = model_local.transcribe(chunk_path, language="ja", fp16=False, no_speech_threshold=0.1)["text"]
+            pipe_conn.send(result)
+        except Exception as e:
+            pipe_conn.send(f"ERROR: {e}")
+
+    parent_conn, child_conn = multiprocessing.Pipe()
+    p = multiprocessing.Process(target=worker, args=(child_conn, model_size, chunk))
+    p.start()
+    p.join(timeout)
+    if p.is_alive():
+        p.terminate()
+        return "ERROR: タイムアウトしました"
+    return parent_conn.recv()
+
 # --- UI ---
 st.title("🎙️ YouTube文字起こしツール（完全無料公開版）")
 
@@ -90,7 +110,6 @@ if st.button("▶️ 文字起こし開始"):
         progress_bar = st.progress(0, text="開始準備中…")
 
         try:
-            model = load_model(model_size)
             temp_id = str(uuid.uuid4())
 
             status.info("🔄 音声ダウンロード中…")
@@ -119,22 +138,27 @@ if st.button("▶️ 文字起こし開始"):
                     st.warning(f"{chunk} は無音のためスキップされました。")
                     continue
 
-                try:
-                    start = time.time()
-                    status_text = f"🧠 {i+1}/{total_chunks} チャンク文字起こし中…"
-                    if durations:
-                        avg = sum(durations) / len(durations)
-                        remaining = int(avg * (total_chunks - i))
-                        mins, secs = divmod(remaining, 60)
-                        status_text += f"（残り：約 {mins}分 {secs}秒）"
-                    progress_bar.progress(min((i+1) / total_chunks, 1.0), text=status_text)
+                start = time.time()
+                status_text = f"🧠 {i+1}/{total_chunks} チャンク文字起こし中…"
+                if durations:
+                    avg = sum(durations) / len(durations)
+                    remaining = int(avg * (total_chunks - i))
+                    mins, secs = divmod(remaining, 60)
+                    status_text += f"（残り：約 {mins}分 {secs}秒）"
+                progress_bar.progress(min((i+1) / total_chunks, 1.0), text=status_text)
 
-                    result = model.transcribe(chunk, language="ja", fp16=False)["text"]
-                    texts.append(result)
-                    durations.append(time.time() - start)
-                    st.success(f"✅ {chunk} 完了")
-                except Exception as e:
-                    st.error(f"❌ {chunk} の文字起こしに失敗: {e}")
+                st.info(f"🧠 {chunk} の文字起こしを開始します…")
+                print(f"--- TRANSCRIBE開始: {chunk} ---")
+                result = transcribe_chunk_with_timeout(model_size, chunk, timeout=60)
+                print(f"--- TRANSCRIBE終了: {chunk} ---")
+
+                if result.startswith("ERROR"):
+                    st.error(f"❌ {chunk} の文字起こしに失敗: {result}")
+                    continue
+
+                texts.append(result)
+                durations.append(time.time() - start)
+                st.success(f"✅ {chunk} 完了")
 
             progress_bar.progress(1.0, text="🎉 文字起こし完了！")
 
@@ -148,7 +172,6 @@ if st.button("▶️ 文字起こし開始"):
                 output_placeholder.text_area("以下が文字起こしの全文です：", formatted_text, height=400)
                 copy_btn_placeholder.download_button("📋 全文コピー（テキストファイル）", formatted_text, file_name="transcription.txt")
 
-            # クリーンアップ
             for f in [wav_file, m4a_file] + chunks:
                 if os.path.exists(f):
                     os.remove(f)
