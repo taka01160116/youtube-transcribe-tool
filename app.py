@@ -6,14 +6,20 @@ import os
 import uuid
 import re
 import time
+import torch
 from glob import glob
 
 st.set_page_config(page_title="YouTube文字起こしツール")
 
+# GPU利用可否チェック
+USE_GPU = torch.cuda.is_available()
+DEVICE = "cuda" if USE_GPU else "cpu"
+
 # Whisperモデルをキャッシュ（初回のみ読み込み）
 @st.cache_resource(show_spinner="Whisperモデルを読み込み中…（初回のみ数十秒）")
 def load_model():
-    return whisper.load_model("tiny")  # 精度維持なら"base"や"medium"でもOK
+    model = whisper.load_model("base")  # base = 精度と速度のバランス良
+    return model.to(DEVICE)
 
 # YouTubeから音声ダウンロード＋WAV変換
 def download_and_convert(url, temp_id):
@@ -70,15 +76,12 @@ if st.button("▶️ 文字起こし開始"):
         progress_bar = st.progress(0, text="開始準備中…")
 
         try:
-            # モデル読み込み
             model = load_model()
 
-            # 音声ダウンロード
             temp_id = str(uuid.uuid4())
             status.info("🔄 音声ダウンロード中…")
             wav_file, m4a_file = download_and_convert(url, temp_id)
 
-            # 分割
             status.info("🔄 音声分割中…")
             chunks = split_audio_fast(wav_file)
             total_chunks = len(chunks)
@@ -87,7 +90,6 @@ if st.button("▶️ 文字起こし開始"):
 
             status.success(f"✅ {total_chunks} チャンクに分割されました")
 
-            # 文字起こし
             texts = []
             durations = []
 
@@ -95,22 +97,20 @@ if st.button("▶️ 文字起こし開始"):
                 start = time.time()
                 status_text = f"🧠 {i+1}/{total_chunks} チャンク文字起こし中…"
 
-                # 残り予測時間
                 if durations:
                     avg = sum(durations) / len(durations)
                     remaining = int(avg * (total_chunks - i))
                     mins, secs = divmod(remaining, 60)
                     status_text += f"（残り：約 {mins}分 {secs}秒）"
 
-                progress_bar.progress(i / total_chunks, text=status_text)
+                progress_bar.progress(min((i+1) / total_chunks, 1.0), text=status_text)
 
-                result = model.transcribe(chunk, language="ja")["text"]
+                result = model.transcribe(chunk, language="ja", fp16=False)["text"]
                 texts.append(result)
                 durations.append(time.time() - start)
 
             progress_bar.progress(1.0, text="🎉 文字起こし完了！")
 
-            # 整形と出力
             full = "\n".join(texts)
             formatted = format_text_japanese(full)
 
@@ -118,7 +118,6 @@ if st.button("▶️ 文字起こし開始"):
             st.text_area("", formatted, height=400)
             st.download_button("📋 全文コピー", formatted, file_name="transcription.txt")
 
-            # クリーンアップ
             for f in [wav_file, m4a_file] + chunks:
                 if os.path.exists(f):
                     os.remove(f)
